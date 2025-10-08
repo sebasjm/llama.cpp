@@ -120,6 +120,7 @@ struct slot_params {
     int32_t n_discard =  0; // number of tokens after n_keep that may be discarded when shifting context, 0 defaults to half
     int32_t n_predict = -1; // new tokens to predict
     int32_t n_indent  =  0; // minimum line indentation for the generated text in number of whitespace characters
+    int32_t n_stream  =  0; // number of tokens hold before stream
 
     int64_t t_max_prompt_ms  = -1; // TODO: implement
     int64_t t_max_predict_ms = -1; // if positive, limit the generation phase to this time limit
@@ -321,6 +322,8 @@ struct server_task {
         params.n_indent         = json_value(data,       "n_indent",           defaults.n_indent);
         params.n_keep           = json_value(data,       "n_keep",             defaults.n_keep);
         params.n_discard        = json_value(data,       "n_discard",          defaults.n_discard);
+        params.n_stream         = json_value(data,       "n_stream",           defaults.n_stream);
+        
       //params.t_max_prompt_ms  = json_value(data,       "t_max_prompt_ms",    defaults.t_max_prompt_ms); // TODO: implement
         params.t_max_predict_ms = json_value(data,       "t_max_predict_ms",   defaults.t_max_predict_ms);
         params.response_fields  = json_value(data,       "response_fields",   std::vector<std::string>());
@@ -1459,6 +1462,7 @@ struct server_slot {
     server_tokens cache_tokens;
 
     std::vector<completion_token_output> generated_token_probs;
+    std::vector<completion_token_output> pending_partial;
 
     std::vector<ctx_checkpoint> ctx_checkpoints;
 
@@ -2565,7 +2569,9 @@ struct server_context {
 
             slot.add_token(result);
             if (slot.params.stream) {
-                send_partial_response(slot, result, false);
+                // FIXME: only N tokens
+                // send_partial_response(slot, result, false);
+                inc_partial_response(slot, result);
             }
         }
 
@@ -2757,6 +2763,44 @@ struct server_context {
         return true;
     }
 
+    void inc_partial_response(server_slot & slot, const completion_token_output & tkn) {
+        auto res = std::make_unique<server_task_result_cmpl_partial>();
+
+        slot.pending_partial.push_back(tkn);
+        slot.update_chat_msg(res->oaicompat_msg_diffs);
+
+        flush_partial_response(slot, false);        
+    }
+
+    void flush_partial_response(server_slot & slot, bool force) {
+        auto res = std::make_unique<server_task_result_cmpl_partial>();
+
+        res->id    = slot.id_task;
+        res->index = slot.index;
+
+        res->n_decoded           = slot.n_decoded;
+        res->n_prompt_tokens     = slot.n_prompt_tokens;
+        res->post_sampling_probs = slot.params.post_sampling_probs;
+
+        res->verbose               = slot.params.verbose;
+        res->oaicompat             = slot.params.oaicompat;
+        res->oaicompat_model       = slot.params.oaicompat_model;
+        res->oaicompat_cmpl_id     = slot.params.oaicompat_cmpl_id;
+
+        if (slot.stop != STOP_TYPE_NONE || slot.params.timings_per_token) {
+            res->timings = slot.get_timings();
+        }
+
+        if (slot.pending_partial.size() >= slot.params.n_stream || force) {
+            for (auto & part : slot.pending_partial) {
+                res->content += part.text_to_send;
+                res->tokens.push_back(part.tok);
+            }
+            queue_results.send(std::move(res));
+            slot.pending_partial.clear();
+        }
+    }
+
     void send_partial_response(server_slot & slot, const completion_token_output & tkn, bool is_progress) {
         auto res = std::make_unique<server_task_result_cmpl_partial>();
 
@@ -2799,6 +2843,9 @@ struct server_context {
     }
 
     void send_final_response(server_slot & slot) {
+        if (slot.params.stream) {
+            flush_partial_response(slot, true);
+        }
         auto res = std::make_unique<server_task_result_cmpl_final>();
         res->id              = slot.id_task;
         res->id_slot         = slot.id;
