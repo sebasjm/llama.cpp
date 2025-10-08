@@ -3363,8 +3363,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, int value) {
             params.timeout_read  = value;
             params.timeout_write = value;
+            params.timeout_idle  = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TIMEOUT"));
+    add_opt(common_arg(
+        {"--systemd"},
+        string_format("enable systemd integration (default: %s)", params.systemd ? "enabled" : "disabled"),
+        [](common_params & params) {
+            params.systemd = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SYSTEMD"));
     add_opt(common_arg(
         {"--threads-http"}, "N",
         string_format("number of threads used to process HTTP requests (default: %d)", params.n_threads_http),

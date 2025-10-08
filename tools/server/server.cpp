@@ -4094,6 +4094,37 @@ inline void signal_handler(int signal) {
     shutdown_handler(signal);
 }
 
+/**
+ * Signal to systemd that this service is ready
+ */
+void notify_ready();
+/**
+ * Signal to systemd that this service is still alive
+ */
+void notify_beat();
+/**
+ * Modified http server
+ */
+class StdinHttpServer: public httplib::Server {
+
+    public:
+    /** 
+     * Set the socket without open it.
+     */
+    inline void set_socket(const socket_t host) {
+        this->svr_sock_ = host;
+    }
+    /** 
+     * Close the socket without shutdown
+     * https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html#Accept=
+     */
+    inline void terminate() {
+        int sock = this->svr_sock_;
+        set_socket(INVALID_SOCKET);
+        close(sock);
+    }
+};
+
 int main(int argc, char ** argv) {
     // own arguments required by this example
     common_params params;
@@ -4115,7 +4146,10 @@ int main(int argc, char ** argv) {
     LOG_INF("%s\n", common_params_get_system_info(params).c_str());
     LOG_INF("\n");
 
-    std::unique_ptr<httplib::Server> svr;
+    /**
+     * Use the hacked http server
+     */
+    std::unique_ptr<StdinHttpServer> svr;
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
     if (params.ssl_file_key != "" && params.ssl_file_cert != "") {
         LOG_INF("Running with SSL: key = %s, cert = %s\n", params.ssl_file_key.c_str(), params.ssl_file_cert.c_str());
@@ -4124,14 +4158,20 @@ int main(int argc, char ** argv) {
         );
     } else {
         LOG_INF("Running without SSL\n");
-        svr.reset(new httplib::Server());
+        /**
+        * Create the hacked http server
+        */
+        svr.reset(new StdinHttpServer());
     }
 #else
     if (params.ssl_file_key != "" && params.ssl_file_cert != "") {
         LOG_ERR("Server is built without SSL support\n");
         return 1;
     }
-    svr.reset(new httplib::Server());
+    /**
+     * Create the hacked http server
+     */
+    svr.reset(new StdinHttpServer());
 #endif
 
     std::atomic<server_state> state{SERVER_STATE_LOADING_MODEL};
@@ -4179,6 +4219,10 @@ int main(int argc, char ** argv) {
     // set timeouts and change hostname and port
     svr->set_read_timeout (params.timeout_read);
     svr->set_write_timeout(params.timeout_write);
+    /**
+     * Wake up if no packet. Should be equal to WATCHDOG timeout
+     */
+    svr->set_idle_interval(params.timeout_idle);
 
     std::unordered_map<std::string, std::string> log_data;
 
@@ -4256,8 +4300,14 @@ int main(int argc, char ** argv) {
     };
 
     // register server middlewares
-    svr->set_pre_routing_handler([&middleware_validate_api_key, &middleware_server_state](const httplib::Request & req, httplib::Response & res) {
+    svr->set_pre_routing_handler([&params, &middleware_validate_api_key, &middleware_server_state](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+        /**
+         * Notify heartbeat for systemd watchdog
+         */
+        if (params.systemd) {
+            notify_beat();
+        }
         // If this is OPTIONS request, skip validation because browsers don't include Authorization header
         if (req.method == "OPTIONS") {
             res.set_header("Access-Control-Allow-Credentials", "true");
@@ -5303,7 +5353,12 @@ int main(int argc, char ** argv) {
 
     bool was_bound = false;
     bool is_sock = false;
-    if (string_ends_with(std::string(params.hostname), ".sock")) {
+    if (params.systemd) {
+        is_sock = true;
+        was_bound = true;
+        LOG_INF("%s: using socket from systemd\n", __func__);
+        svr->set_socket(3);
+    } else if (string_ends_with(std::string(params.hostname), ".sock")) {
         is_sock = true;
         LOG_INF("%s: setting address family to AF_UNIX\n", __func__);
         svr->set_address_family(AF_UNIX);
@@ -5329,9 +5384,6 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // run the HTTP server in a thread
-    std::thread t([&]() { svr->listen_after_bind(); });
-    svr->wait_until_ready();
 
     LOG_INF("%s: HTTP server is listening, hostname: %s, port: %d, http threads: %d\n", __func__, params.hostname.c_str(), params.port, params.n_threads_http);
 
@@ -5340,13 +5392,19 @@ int main(int argc, char ** argv) {
 
     if (!ctx_server.load_model(params)) {
         clean_up();
-        t.join();
         LOG_ERR("%s: exiting due to model loading error\n", __func__);
         return 1;
     }
 
     ctx_server.init();
     state.store(SERVER_STATE_READY);
+
+    /**
+     * Listen after loading the model so we don't loose the first connection.
+     */ 
+    // run the HTTP server in a thread
+    std::thread t([&]() { svr->listen_after_bind(); });
+    svr->wait_until_ready();
 
     LOG_INF("%s: model loaded\n", __func__);
 
@@ -5386,6 +5444,10 @@ int main(int argc, char ** argv) {
             is_sock ? string_format("unix://%s", params.hostname.c_str()).c_str() :
                       string_format("http://%s:%d", params.hostname.c_str(), params.port).c_str());
 
+    if (params.systemd) {
+        notify_ready();
+    }
+
     // this call blocks the main thread until queue_tasks.terminate() is called
     ctx_server.queue_tasks.start_loop();
 
@@ -5394,3 +5456,34 @@ int main(int argc, char ** argv) {
 
     return 0;
 }
+
+
+void notify_beat() {
+    /* Based on the systemd configuration the NOTIFY_SOCKET will
+       be opened and with id 4
+    */
+    int notify_fd = 4;
+
+    std::string message = "WATCHDOG=1";
+    if (write(notify_fd, message.c_str(), message.length()) == -1) {
+        perror("write");
+        close(notify_fd);
+        return;
+    }
+}
+
+void notify_ready() {
+    /* Based on the systemd configuration the NOTIFY_SOCKET will
+       be opened and with id 4
+    */
+    int notify_fd = 4;
+
+    std::string message = "READY=1";
+    if (write(notify_fd, message.c_str(), message.length()) == -1) {
+        perror("write");
+        close(notify_fd);
+        return;
+    }
+
+}
+

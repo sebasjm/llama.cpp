@@ -423,6 +423,7 @@ struct common_params {
     int32_t port              = 8080;         // server listens on this network port
     int32_t timeout_read      = 600;          // http read timeout in seconds
     int32_t timeout_write     = timeout_read; // http write timeout in seconds
+    int32_t timeout_idle      = timeout_read; // http idle timeout in seconds
     int32_t n_threads_http    = -1;           // number of threads to process HTTP requests (TODO: support threadpool)
     int32_t n_cache_reuse     = 0;            // min chunk size to reuse from the cache via KV shifting
     int32_t n_ctx_checkpoints = 3;            // max number of context checkpoints per slot
@@ -449,6 +450,7 @@ struct common_params {
     bool endpoint_slots   = true;
     bool endpoint_props   = false; // only control POST requests, not GET
     bool endpoint_metrics = false;
+    bool systemd          = false;
 
     bool log_json = false;
 
