@@ -5661,7 +5661,7 @@ int main(int argc, char ** argv) {
     // clean up function, to be called before exit
     auto clean_up = [&svr, &ctx_server]() {
         SRV_INF("%s: cleaning up before exit...\n", __func__);
-        svr->stop();
+        svr->terminate();
         ctx_server.queue_results.terminate();
         llama_backend_free();
     };
@@ -5747,6 +5747,8 @@ int main(int argc, char ** argv) {
     sigemptyset (&sigint_action.sa_mask);
     sigint_action.sa_flags = 0;
     sigaction(SIGINT, &sigint_action, NULL);
+    sigaction(SIGHUP, &sigint_action, NULL);
+    sigaction(SIGABRT, &sigint_action, NULL);
     sigaction(SIGTERM, &sigint_action, NULL);
 #elif defined (_WIN32)
     auto console_ctrl_handler = +[](DWORD ctrl_type) -> BOOL {
