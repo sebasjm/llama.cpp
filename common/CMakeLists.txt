@@ -122,6 +122,10 @@ add_library(${TARGET}
     jinja/caps.h
     )
 
+if (UNIX AND NOT APPLE AND LLAMA_SYSTEMD)
+    target_compile_definitions(${TARGET} PRIVATE LLAMA_USE_SYSTEMD)
+endif()
+
 set_target_properties(${TARGET} PROPERTIES
     VERSION ${LLAMA_VERSION_BASE}
     SOVERSION ${LLAMA_VERSION_MAJOR}

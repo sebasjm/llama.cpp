@@ -7834,6 +7834,12 @@ Server &Server::set_ipv6_v6only(bool on) {
   return *this;
 }
 
+Server &Server::set_socket(const socket_t n_sock) {
+  svr_sock_ = n_sock;
+  owned_socket_ = false;
+  return *this;
+}
+
 Server &Server::set_socket_options(SocketOptions socket_options) {
   socket_options_ = std::move(socket_options);
   return *this;
@@ -7931,6 +7937,11 @@ int Server::bind_to_any_port(const std::string &host, int socket_flags) {
 
 bool Server::listen_after_bind() { return listen_internal(); }
 
+bool Server::listen(const socket_t external_sock) {
+  set_socket(external_sock);
+  return listen_internal();
+}
+
 bool Server::listen(const std::string &host, int port,
                            int socket_flags) {
   return bind_to_port(host, port, socket_flags) && listen_internal();
@@ -7949,7 +7960,7 @@ void Server::stop() noexcept {
   // bind_to_port() without listen_after_bind() still owns the descriptor. The
   // exchange is what makes this safe to call concurrently with the accept loop.
   socket_t sock = svr_sock_.exchange(INVALID_SOCKET);
-  if (sock != INVALID_SOCKET) {
+  if (sock != INVALID_SOCKET && owned_socket_) {
     detail::shutdown_socket(sock);
     detail::close_socket(sock);
   }
