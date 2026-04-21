@@ -126,6 +126,10 @@ set_target_properties(${TARGET} PROPERTIES
     MACHO_CURRENT_VERSION 0 # keep macOS linker from seeing oversized version number
 )
 
+if (UNIX AND NOT APPLE AND LLAMA_SYSTEMD)
+    target_compile_definitions(${TARGET} PRIVATE LLAMA_USE_SYSTEMD)
+endif()
+
 target_include_directories(${TARGET} PUBLIC . ../vendor)
 target_compile_features   (${TARGET} PUBLIC cxx_std_17)
 

@@ -61,5 +61,12 @@ set(TARGET llama-server)
 add_executable(${TARGET} main.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 
+if (UNIX AND NOT APPLE AND LLAMA_SYSTEMD)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+    target_link_libraries(${TARGET} PRIVATE PkgConfig::SYSTEMD)
+    target_compile_definitions(${TARGET} PRIVATE LLAMA_USE_SYSTEMD)
+endif()
+
 target_link_libraries(${TARGET} PRIVATE llama-server-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

@@ -12,6 +12,10 @@
 #include <string>
 #include <thread>
 
+// #ifdef LLAMA_USE_SYSTEMD
+    #include <systemd/sd-daemon.h>
+// #endif
+
 //
 // HTTP implementation using cpp-httplib
 //
@@ -91,6 +95,7 @@ bool server_http_context::init(const common_params & params) {
     path_prefix = params.api_prefix;
     port = params.port;
     hostname = params.hostname;
+    systemd = params.systemd;
 
     if (gcp.enabled) {
         SRV_TRC("Google Cloud Platform compat: health route = %s, predict route = %s, port = %d\n", gcp.path_health.c_str(), gcp.path_predict.c_str(), gcp.port);
@@ -120,7 +125,7 @@ bool server_http_context::init(const common_params & params) {
         SRV_ERR("%s", "the server is built without SSL support\n");
         return false;
     }
-    srv.reset(new httplib::Server());
+    srv = std::make_unique<httplib::Server>();
 #endif
 
     srv->set_default_headers({{"Server", "llama.cpp"}});
@@ -161,6 +166,8 @@ bool server_http_context::init(const common_params & params) {
     // set timeouts and change hostname and port
     srv->set_read_timeout (params.timeout_read);
     srv->set_write_timeout(params.timeout_write);
+    // Wake up if no packet. Should be equal to WATCHDOG timeout
+    srv->set_idle_interval(params.timeout_idle);
     srv->set_socket_options([reuse_port = params.reuse_port](const socket_t sock) {
         httplib::set_socket_opt(sock, SOL_SOCKET, SO_REUSEADDR, 1);
         if (reuse_port) {
@@ -277,6 +284,13 @@ bool server_http_context::init(const common_params & params) {
 
     // register server middlewares
     srv->set_pre_routing_handler([&params, middleware_validate_api_key, middleware_server_state](const httplib::Request & req, httplib::Response & res) {
+        // notify heartbeat for systemd watchdog
+// #ifdef LLAMA_USE_SYSTEMD
+        if (params.systemd) {
+            // Tells the service manager to update the watchdog timestamp
+            sd_notify(0, "WATCHDOG=1");
+        }
+// #endif
         if (params.cors_credentials && params.cors_origins == "*") {
             // special case: echo back the Origin header to allow any origin to access the server with credentials
             res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
@@ -430,6 +444,15 @@ bool server_http_context::start() {
     const auto & srv = pimpl->srv;
     auto was_bound = false;
     auto is_sock = false;
+// #ifdef LLAMA_USE_SYSTEMD
+    SRV_TRC("systemd %s listen %d", systemd? "on": "off", sd_listen_fds(0));
+    if (systemd && sd_listen_fds(0) > 0) {
+        is_sock = true;
+        was_bound = true;
+        SRV_TRC("%s: using socket from systemd\n", __func__);
+        srv->set_socket(SD_LISTEN_FDS_START);
+    } else
+// #endif
     if (string_ends_with(std::string(hostname), ".sock")) {
         is_sock = true;
         SRV_TRC("%s", "setting address family to AF_UNIX\n");
@@ -462,10 +485,23 @@ bool server_http_context::start() {
 
     listening_address = is_sock ? string_format("unix://%s", hostname.c_str())
                                 : string_format("%s://%s:%d", is_ssl ? "https" : "http", common_http_format_host(hostname).c_str(), port);
+
+// #ifdef LLAMA_USE_SYSTEMD
+    if (systemd) {
+        // Tells the service manager that service startup is finished
+        sd_notify(0, "READY=1");
+    }
+// #endif
     return true;
 }
 
 void server_http_context::stop() const {
+// #ifdef LLAMA_USE_SYSTEMD
+    if (systemd) {
+        // Tells the service manager that the service is beginning its shutdown
+        sd_notify(0, "STOPPING=1");
+    }
+// #endif
     if (pimpl->srv) {
         pimpl->srv->stop();
     }
@@ -830,4 +866,5 @@ void server_http_context::register_gcp_compat() const {
         res->data = safe_json_to_str({{"predictions", predictions}});
         return res;
     });
+
 }

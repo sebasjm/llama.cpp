@@ -7,6 +7,13 @@ add_library(${TARGET} cli.cpp
                       cli-context.cpp)
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
+if (UNIX AND NOT APPLE AND LLAMA_SYSTEMD)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+    target_link_libraries(${TARGET} PRIVATE PkgConfig::SYSTEMD)
+    target_compile_definitions(${TARGET} PRIVATE LLAMA_USE_SYSTEMD)
+endif()
+
 target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ../server)
 target_link_libraries(${TARGET} PUBLIC llama-server-impl llama-common ${CMAKE_THREAD_LIBS_INIT})
 
