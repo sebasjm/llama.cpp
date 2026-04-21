@@ -421,6 +421,8 @@ int llama_server(int argc, char ** argv) {
     sigemptyset (&sigint_action.sa_mask);
     sigint_action.sa_flags = 0;
     sigaction(SIGINT, &sigint_action, NULL);
+    sigaction(SIGABRT, &sigint_action, NULL);
+    sigaction(SIGHUP, &sigint_action, NULL);
     sigaction(SIGTERM, &sigint_action, NULL);
 #elif defined (_WIN32)
     auto console_ctrl_handler = +[](DWORD ctrl_type) -> BOOL {

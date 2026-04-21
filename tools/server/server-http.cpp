@@ -12,13 +12,57 @@
 #include <string>
 #include <thread>
 
+/* Based on the systemd configuration the NOTIFY_SOCKET will
+    be opened and with id 4
+*/
+const static int systemd_notify_socket = 4;
+const static int systemd_incoming_socket = 3;
+/**
+ * Signal to systemd that this service is ready
+ */
+void notify_ready();
+/**
+ * Signal to systemd that this service is still alive
+ */
+void notify_beat();
+
+/**
+ * Modified http server that doesn't open nor shutdown
+ * socket connection.
+ */
+class StdinHttpServer: public httplib::Server {
+
+    public:
+    /**
+     * Set the socket without open it.
+     */
+    inline void set_socket(const socket_t host) {
+        this->svr_sock_ = host;
+    }
+    /**
+     * Close the socket without shutdown
+     * https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html#Accept=
+     */
+    inline void terminate() {
+        int sock = this->svr_sock_;
+        set_socket(INVALID_SOCKET);
+        close(sock);
+    }
+};
+class StdinHttpsServer: public httplib::SSLServer, public StdinHttpServer {
+
+    public:
+    StdinHttpsServer(const char* cert, const char* key): httplib::SSLServer(cert, key) {}
+};
+
+
 //
 // HTTP implementation using cpp-httplib
 //
 
 class server_http_context::Impl {
 public:
-    std::unique_ptr<httplib::Server> srv;
+    std::unique_ptr<StdinHttpServer> srv;
 };
 
 server_http_context::server_http_context()
@@ -81,6 +125,7 @@ bool server_http_context::init(const common_params & params) {
     path_prefix = params.api_prefix;
     port = params.port;
     hostname = params.hostname;
+    systemd = params.systemd;
 
     if (gcp.enabled) {
         SRV_INF("Google Cloud Platform compat: health route = %s, predict route = %s, port = %d\n", gcp.path_health.c_str(), gcp.path_predict.c_str(), gcp.port);
@@ -97,20 +142,24 @@ bool server_http_context::init(const common_params & params) {
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
     if (!params.ssl_file_key.empty() && !params.ssl_file_cert.empty()) {
         SRV_INF("running with SSL: key = %s, cert = %s\n", params.ssl_file_key.c_str(), params.ssl_file_cert.c_str());
-        srv = std::make_unique<httplib::SSLServer>(
-            params.ssl_file_cert.c_str(), params.ssl_file_key.c_str()
+    //  srv = std::make_unique<httplib::SSLServer>(
+    //      params.ssl_file_cert.c_str(), params.ssl_file_key.c_str()
+        srv.reset(
+            new StdinHttpsServer(params.ssl_file_cert.c_str(), params.ssl_file_key.c_str())
         );
         is_ssl = true;
     } else {
+        // SRV_INF("%s", "running without SSL\n");
+        // srv = std::make_unique<httplib::Server>();
         SRV_INF("%s", "running without SSL\n");
-        srv = std::make_unique<httplib::Server>();
+        srv.reset(new StdinHttpServer());
     }
 #else
     if (params.ssl_file_key != "" && params.ssl_file_cert != "") {
         SRV_ERR("%s", "the server is built without SSL support\n");
         return false;
     }
-    srv.reset(new httplib::Server());
+    srv.reset(new StdinHttpServer());
 #endif
 
     srv->set_default_headers({{"Server", "llama.cpp"}});
@@ -151,6 +200,8 @@ bool server_http_context::init(const common_params & params) {
     // set timeouts and change hostname and port
     srv->set_read_timeout (params.timeout_read);
     srv->set_write_timeout(params.timeout_write);
+    // Wake up if no packet. Should be equal to WATCHDOG timeout
+    srv->set_idle_interval(params.timeout_idle);
     srv->set_socket_options([reuse_port = params.reuse_port](const socket_t sock) {
         httplib::set_socket_opt(sock, SOL_SOCKET, SO_REUSEADDR, 1);
         if (reuse_port) {
@@ -268,8 +319,13 @@ bool server_http_context::init(const common_params & params) {
         return true;
     };
 
+    bool systemd_enabled = systemd;
     // register server middlewares
-    srv->set_pre_routing_handler([middleware_validate_api_key, middleware_server_state](const httplib::Request & req, httplib::Response & res) {
+    srv->set_pre_routing_handler([systemd_enabled, middleware_validate_api_key, middleware_server_state](const httplib::Request & req, httplib::Response & res) {
+        // notify heartbeat for systemd watchdog
+        if (systemd_enabled) {
+            notify_beat();
+        }
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         // If this is OPTIONS request, skip validation because browsers don't include Authorization header
         if (req.method == "OPTIONS") {
@@ -408,9 +464,14 @@ bool server_http_context::start() {
     // Bind and listen
 
     const auto & srv = pimpl->srv;
-    auto was_bound = false;
-    auto is_sock = false;
-    if (string_ends_with(std::string(hostname), ".sock")) {
+    bool was_bound = false;
+    bool is_sock = false;
+    if (systemd) {
+        is_sock = true;
+        was_bound = true;
+        LOG_INF("%s: using socket from systemd\n", __func__);
+        srv->set_socket(systemd_incoming_socket);
+    } else if (string_ends_with(std::string(hostname), ".sock")) {
         is_sock = true;
         SRV_INF("%s", "setting address family to AF_UNIX\n");
         srv->set_address_family(AF_UNIX);
@@ -442,12 +503,20 @@ bool server_http_context::start() {
 
     listening_address = is_sock ? string_format("unix://%s", hostname.c_str())
                                 : string_format("%s://%s:%d", is_ssl ? "https" : "http", hostname.c_str(), port);
+
+    if (systemd) {
+        notify_ready();
+    }
     return true;
 }
 
 void server_http_context::stop() const {
     if (pimpl->srv) {
-        pimpl->srv->stop();
+        if (systemd) {
+            pimpl->srv->terminate();
+        } else {
+            pimpl->srv->stop();
+        }
     }
 }
 
@@ -822,4 +891,21 @@ void server_http_context::register_gcp_compat() const {
         res->data = safe_json_to_str({{"predictions", predictions}});
         return res;
     });
+
+}
+
+inline void notify_beat() {
+    if (write(systemd_notify_socket, "WATCHDOG=1", 10) == -1) {
+        perror("notify_beat.write");
+        close(systemd_notify_socket);
+        return;
+    }
+}
+
+inline void notify_ready() {
+    if (write(systemd_notify_socket, "READY=1", 7) == -1) {
+        perror("notify_ready.write");
+        close(systemd_notify_socket);
+        return;
+    }
 }

@@ -86,6 +86,7 @@ struct server_http_context {
     std::string hostname;
     int port    = 8080;
     bool is_ssl = false;
+    bool systemd;
 
     server_http_context();
     ~server_http_context();
