@@ -79,6 +79,9 @@ struct server_http_context {
     std::string hostname;
     int port    = 8080;
     bool is_ssl = false;
+#ifdef LLAMA_USE_SYSTEMD
+    bool systemd;
+#endif
 
     server_http_context();
     ~server_http_context();

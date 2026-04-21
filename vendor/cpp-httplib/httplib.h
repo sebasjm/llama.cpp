@@ -1821,6 +1821,7 @@ public:
   Server &set_address_family(int family);
   Server &set_tcp_nodelay(bool on);
   Server &set_ipv6_v6only(bool on);
+  Server &set_socket(const socket_t socket);
   Server &set_socket_options(SocketOptions socket_options);
 
   Server &set_default_headers(Headers headers);
@@ -1861,6 +1862,7 @@ public:
   bool listen_after_bind();
 
   bool listen(const std::string &host, int port, int socket_flags = 0);
+  bool listen(const socket_t external_sock);
 
   bool is_running() const;
   void wait_until_ready() const;
@@ -1893,6 +1895,7 @@ protected:
   time_t websocket_ping_interval_sec_ =
       CPPHTTPLIB_WEBSOCKET_PING_INTERVAL_SECOND;
   int websocket_max_missed_pongs_ = CPPHTTPLIB_WEBSOCKET_MAX_MISSED_PONGS;
+  bool owned_socket_ = true;
 
 private:
   using Handlers =

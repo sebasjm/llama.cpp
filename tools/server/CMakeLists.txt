@@ -25,6 +25,14 @@ add_library(${TARGET} STATIC
     server-schema.h
 )
 
+if (UNIX AND NOT APPLE AND LLAMA_SYSTEMD)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+    target_link_libraries(${TARGET} PRIVATE PkgConfig::SYSTEMD)
+    target_compile_definitions(${TARGET} PRIVATE LLAMA_USE_SYSTEMD)
+endif()
+
+
 if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -44,6 +52,14 @@ add_library(${TARGET}
     server-models.cpp
     server-models.h
 )
+
+if (UNIX AND NOT APPLE AND LLAMA_SYSTEMD)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+    target_link_libraries(${TARGET} PRIVATE PkgConfig::SYSTEMD)
+    target_compile_definitions(${TARGET} PRIVATE LLAMA_USE_SYSTEMD)
+endif()
+
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
