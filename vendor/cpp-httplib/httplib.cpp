@@ -1694,6 +1694,42 @@ ssize_t select_impl(socket_t sock, short events, time_t sec,
   return handle_EINTR([&]() { return poll_wrapper(&pfd, 1, timeout); });
 }
 
+#define SOCKET_STOP_SIGNAL -10
+int shutdown_pipe_fds[2];
+
+void signal_stop() {
+  char wake_byte = 'X';
+  // FIXME: what if the pipe was not created properly
+  write(shutdown_pipe_fds[1], &wake_byte, 1);
+}
+
+void start_control_channel() {
+  // FIXME: handle failure
+  pipe(shutdown_pipe_fds);
+}
+
+ssize_t select_read_ctrl(socket_t sock, time_t sec, time_t usec) {
+  struct pollfd pfd[2];
+  pfd[0].fd = sock;
+  pfd[0].events = POLLIN;
+  pfd[0].revents = 0;
+
+  // FIXME: what if the pipe was not created properly
+  pfd[1].fd = shutdown_pipe_fds[0];
+  pfd[1].events = POLLIN;
+  pfd[1].revents = 0;
+
+  auto timeout = static_cast<int>(sec * 1000 + usec / 1000);
+
+  return handle_EINTR([&]() {
+    int pres = poll_wrapper(pfd, 2, timeout);
+    if (pfd[1].revents & POLLIN) {
+      return SOCKET_STOP_SIGNAL;
+    }
+    return pres;
+   });
+}
+
 ssize_t select_read(socket_t sock, time_t sec, time_t usec) {
   return select_impl(sock, POLLIN, sec, usec);
 }
@@ -7616,6 +7652,7 @@ Server::Server()
 #ifndef _WIN32
   signal(SIGPIPE, SIG_IGN);
 #endif
+  detail::start_control_channel();
 }
 
 Server::~Server() = default;
@@ -7964,6 +8001,7 @@ void Server::stop() noexcept {
     detail::shutdown_socket(sock);
     detail::close_socket(sock);
   }
+  detail::signal_stop();
   is_decommissioned = false;
 }
 
@@ -8554,11 +8592,14 @@ bool Server::listen_internal() {
 #ifndef _WIN32
       if (idle_interval_sec_ > 0 || idle_interval_usec_ > 0) {
 #endif
-        auto val = detail::select_read(svr_sock_, idle_interval_sec_,
-                                       idle_interval_usec_);
+        auto val = detail::select_read_ctrl(svr_sock_, idle_interval_sec_,
+                                            idle_interval_usec_);
         if (val == 0) { // Timeout
           task_queue->on_idle();
           continue;
+        }
+        if (val == SOCKET_STOP_SIGNAL) {
+          break;
         }
 #ifndef _WIN32
       }
